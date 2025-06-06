@@ -38,7 +38,6 @@ Creates tables for merged documents and field values.
 new_db = not os.path.exists(db_path)
 conn = sqlite3.connect(db_path, isolation_level=None)
 
-```
 # Optimize SQLite for bulk operations
 conn.execute("PRAGMA journal_mode = WAL")
 conn.execute("PRAGMA synchronous = NORMAL")
@@ -74,20 +73,17 @@ if new_db:
     cursor.execute("CREATE INDEX idx_field_values_field ON field_values(field_name)")
 
 return conn
-```
 
 def insert_field_values_batch(conn: sqlite3.Connection, batch_data: List[tuple]) -> None:
 “”“Insert field values in batches for better performance.”””
 if not batch_data:
 return
 
-```
 cursor = conn.cursor()
 cursor.executemany("""
     INSERT OR IGNORE INTO field_values (merge_key, field_name, value_hash, value_data)
     VALUES (?, ?, ?, ?)
 """, batch_data)
-```
 
 def process_document(conn: sqlite3.Connection, doc: Dict[str, Any], merge_key_field: str,
 batch_data: List[tuple], batch_size: int = 1000) -> List[tuple]:
@@ -98,7 +94,6 @@ Returns updated batch_data.
 if merge_key_field not in doc:
 return batch_data
 
-```
 merge_key_value = doc[merge_key_field]
 merge_key_str = serialize_value(merge_key_value)
 
@@ -133,13 +128,12 @@ if len(batch_data) >= batch_size:
     gc.collect()  # Force garbage collection
 
 return batch_data
-```
 
 def export_merged_data(conn: sqlite3.Connection, output_file: TextIO, merge_key_field: str) -> None:
 “”“Export merged data from SQLite to JSONL format.”””
 cursor = conn.cursor()
 
-```
+
 # Get all unique merge keys
 cursor.execute("SELECT merge_key, key_value FROM merge_keys ORDER BY merge_key")
 
@@ -184,7 +178,7 @@ for merge_key_str, key_value_str in cursor.fetchall():
     # Write to output
     json.dump(merged_doc, output_file, separators=(',', ':'))
     output_file.write('\n')
-```
+
 
 def is_s3_uri(path: str) -> bool:
 “”“Check if path is an S3 URI.”””
@@ -208,7 +202,7 @@ params = {
 ‘multipart_upload_kwargs’: {}
 }
 
-```
+
 if kms_key_id:
     params['multipart_upload_kwargs'].update({
         'ServerSideEncryption': 'aws:kms',
@@ -216,7 +210,7 @@ if kms_key_id:
     })
 
 return params
-```
+
 
 def get_input_stream(input_path: str) -> TextIO:
 “”“Get input stream - stdin, file, or S3.”””
@@ -285,7 +279,7 @@ Supports stdin/stdout via ‘-’ parameter and S3 URIs with KMS encryption.
 “””
 tmp_db = get_temp_db_path(output_path)
 
-```
+
 # Clean up any existing temp DB
 if os.path.exists(tmp_db):
     os.remove(tmp_db)
@@ -383,7 +377,7 @@ finally:
             os.remove(tmp_db)
         except:
             pass
-```
+
 
 def get_file_size_mb(file_path: str) -> float:
 “”“Get file size in MB for progress reporting. Returns 0 for stdin/S3.”””
@@ -410,7 +404,7 @@ help=“Progress reporting interval in lines (default: 10000).”)
 parser.add_argument(”–kms-key-id”, type=str,
 help=“AWS KMS key ID for S3 encryption (optional). Can be key ID, ARN, or alias.”)
 
-```
+
 args = parser.parse_args()
 
 # Validate S3 support if needed
@@ -430,3 +424,126 @@ stream_merge_jsonl_optimized(
     args.progress_interval,
     args.kms_key_id
 )
+
+"""
+TODO: Implement gzip input and output handling
+import argparse
+import json
+import sqlite3
+import os
+import sys
+import hashlib
+import tempfile
+from typing import Any, Dict, List, Optional, Set, Union, TextIO
+import gc
+import urllib.parse
+
+# ← NEW IMPORTS:
+import gzip
+import io
+
+try:
+    from smart_open import open as smart_open
+    SMART_OPEN_AVAILABLE = True
+except ImportError:
+    SMART_OPEN_AVAILABLE = False
+    smart_open = None
+
+
+def is_s3_uri(path: str) -> bool:
+    """Check if path is an S3 URI."""
+    return path.startswith("s3://")
+
+
+def is_stdin_stdout(path: str) -> bool:
+    """Check if path represents stdin/stdout."""
+    return path == "-"
+
+
+def validate_s3_support():
+    """Validate that smart_open is available for S3 operations."""
+    if not SMART_OPEN_AVAILABLE:
+        print("Error: smart_open library is required for S3 support.", file=sys.stderr)
+        print("Install it with: pip install smart_open[s3]", file=sys.stderr)
+        sys.exit(1)
+
+
+def get_s3_transport_params(kms_key_id: Optional[str] = None) -> Dict[str, Any]:
+    """Get S3 transport parameters including KMS encryption."""
+    params = {
+        "multipart_upload": True,
+        "multipart_upload_kwargs": {}
+    }
+    if kms_key_id:
+        params["multipart_upload_kwargs"].update({
+            "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": kms_key_id
+        })
+    return params
+
+
+def get_input_stream(input_path: str) -> TextIO:
+    """
+    Get input stream – stdin, local file, gzip‐wrapped local file,
+    or (possibly gzipped) S3 object.
+    """
+    # 1) stdin
+    if is_stdin_stdout(input_path):
+        return sys.stdin
+
+    # 2) S3 URI
+    elif is_s3_uri(input_path):
+        validate_s3_support()
+        # We’ll need binary mode if it’s “.gz”, otherwise text mode is fine.
+        if input_path.endswith(".gz"):
+            # Open raw bytes from S3, then wrap in gzip + TextIO
+            transport_params = get_s3_transport_params()  # pass no KMS for input
+            raw_stream = smart_open(input_path, "rb", transport_params=transport_params)
+            gzip_stream = gzip.GzipFile(fileobj=raw_stream, mode="rb")
+            return io.TextIOWrapper(gzip_stream, encoding="utf-8")
+        else:
+            # Regular (uncompressed) text from S3
+            transport_params = get_s3_transport_params()  # still pass transport_params if needed
+            return smart_open(input_path, "r", encoding="utf-8", transport_params=transport_params)
+
+    # 3) Local path
+    else:
+        if input_path.endswith(".gz"):
+            # Open local gzip in text mode
+            return gzip.open(input_path, "rt", encoding="utf-8")
+        else:
+            # Regular local file
+            return open(input_path, "r", encoding="utf-8")
+
+
+def get_output_stream(output_path: str, kms_key_id: Optional[str] = None) -> TextIO:
+    """
+    Get output stream – stdout, local file, gzip‐wrapped local file,
+    or (possibly gzipped) S3 object (with optional KMS).
+    """
+    # 1) stdout
+    if is_stdin_stdout(output_path):
+        return sys.stdout
+
+    # 2) S3 URI
+    elif is_s3_uri(output_path):
+        validate_s3_support()
+        transport_params = get_s3_transport_params(kms_key_id)
+        if output_path.endswith(".gz"):
+            # Open raw binary to S3, then wrap in gzip + TextIO
+            raw_stream = smart_open(output_path, "wb", transport_params=transport_params)
+            gzip_stream = gzip.GzipFile(fileobj=raw_stream, mode="wb")
+            return io.TextIOWrapper(gzip_stream, encoding="utf-8")
+        else:
+            # Regular (uncompressed) text‐mode S3
+            return smart_open(output_path, "w", encoding="utf-8", transport_params=transport_params)
+
+    # 3) Local path
+    else:
+        if output_path.endswith(".gz"):
+            # Open local gzip in write‐text mode
+            return gzip.open(output_path, "wt", encoding="utf-8")
+        else:
+            # Regular local file
+            return open(output_path, "w", encoding="utf-8")
+"""
