@@ -80,8 +80,8 @@ def analyze_jsonl(filepath, stop_after_lines=1000, num_samples=10):
         print()
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python quick_analyzer.py <jsonl_file> [stop_after_lines: int]")
+    if len(sys.argv) != 3:
+        print("Usage: python quick_analyzer.py <jsonl_file> <stop_after_lines: int>")
         sys.exit(1)
 
     analyze_jsonl(sys.argv[1], int(sys.argv[2]))
